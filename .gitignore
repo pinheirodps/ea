@@ -1,0 +1,32 @@
+# MetaTrader build artifacts
+*.ex5
+*.log
+*.hst
+*.fxt
+*.tmp
+
+# Local tester/runtime output
+tester/
+Tester/
+logs/
+Logs/
+cache/
+.cache/
+
+# Scratch files for agent/debug work
+scratch/*
+!scratch/.gitkeep
+!scratch/README.md
+
+# Common editor/system noise
+.vscode/
+.idea/
+*.swp
+*.bak
+Thumbs.db
+Desktop.ini
+
+# Python/tooling cache
+__pycache__/
+*.pyc
+.pytest_cache/
