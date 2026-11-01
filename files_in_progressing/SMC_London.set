@@ -1,0 +1,9 @@
+InpSetup=1||1||0||1||2||N
+InpHTF=16385||16385||0||0||0||N
+InpRR=2.0||2.0||1.0||0.5||5.0||N
+InpOffsetInverno=1||1||0||1||5||N
+InpDST=2||2||0||0||2||N
+InpRiscoPct=0.5||0.5||0.1||0.1||1.0||N
+InpMaxSpreadPts=20||20||5||5||50||N
+InpComissaoPorLote=7.0||7.0||0.0||1.0||15.0||N
+InpMagic=440001||440001||1||1||999999||N

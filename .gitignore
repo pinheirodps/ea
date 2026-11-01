@@ -26,6 +26,9 @@ scratch/*
 Thumbs.db
 Desktop.ini
 
+# Data files / heavy exports
+*.csv
+
 # Python/tooling cache
 __pycache__/
 *.pyc

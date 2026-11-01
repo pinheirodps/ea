@@ -48,12 +48,21 @@ enum ENUM_SETUP
    SETUP_H1_OB          // Retorno a Order Block apos BOS no HTF
   };
 
+enum ENUM_DST
+  {
+   DST_NENHUM,          // Sem mudanca sazonal de horario
+   DST_US,              // Regra EUA (2o dom marco a 1o dom novembro)
+   DST_EU               // Regra Europa (ultimo dom marco a ultimo dom outubro)
+  };
+
 // --- Estrategia ---
 input ENUM_SETUP      InpSetup           = SETUP_LONDON_SWEEP; // Setup (seletor, nao afinar)
 input ENUM_TIMEFRAMES InpHTF             = PERIOD_H1;          // Timeframe de estrutura
 input double          InpRR              = 2.0;                // Risk/Reward (UNICO otimizavel)
 
 // --- Operacionais ---
+input int             InpOffsetInverno   = 1;      // Offset-base do servidor vs GMT (inverno)
+input ENUM_DST        InpDST             = DST_EU; // Regra sazonal do servidor (EU/US/Nenhum)
 input double          InpRiscoPct        = 0.50;   // Risco por trade (% equity)
 input int             InpMaxSpreadPts    = 20;     // Spread maximo (pontos)
 input double          InpComissaoPorLote = 7.0;    // Comissao round-turn por lote (moeda da conta)
@@ -107,8 +116,9 @@ int OnInit()
       return(INIT_FAILED);
      }
 
-   PrintFormat("SMC Sniper v4.1 | setup=%s | HTF=%s | RR=%.2f | risco=%.2f%%",
-               EnumToString(InpSetup), EnumToString(InpHTF), InpRR, InpRiscoPct);
+   PrintFormat("SMC Sniper v4.1 | setup=%s | HTF=%s | RR=%.2f | risco=%.2f%% | offset_base=GMT+%d | DST=%s",
+               EnumToString(InpSetup), EnumToString(InpHTF), InpRR, InpRiscoPct,
+               InpOffsetInverno, EnumToString(InpDST));
    return(INIT_SUCCEEDED);
   }
 
@@ -151,31 +161,61 @@ datetime InicioDoDia(const datetime t)
 //+------------------------------------------------------------------+
 int OffsetServidorGMT(const datetime t)
   {
+   if(InpDST == DST_NENHUM)
+      return(InpOffsetInverno);
+
    MqlDateTime dt;
    TimeToStruct(t, dt);
    int ano = dt.year;
 
-   // 2o domingo de marco as 02:00
-   MqlDateTime d_mar;
-   d_mar.year = ano; d_mar.mon = 3; d_mar.day = 1; d_mar.hour = 2; d_mar.min = 0; d_mar.sec = 0;
-   datetime t_mar1 = StructToTime(d_mar);
-   TimeToStruct(t_mar1, d_mar);
-   int dom_mar = (d_mar.day_of_week == 0) ? 8 : (15 - d_mar.day_of_week);
-   d_mar.day = dom_mar;
-   datetime dst_ini = StructToTime(d_mar);
+   datetime dst_ini = 0;
+   datetime dst_fim = 0;
 
-   // 1o domingo de novembro as 02:00
-   MqlDateTime d_nov;
-   d_nov.year = ano; d_nov.mon = 11; d_nov.day = 1; d_nov.hour = 2; d_nov.min = 0; d_nov.sec = 0;
-   datetime t_nov1 = StructToTime(d_nov);
-   TimeToStruct(t_nov1, d_nov);
-   int dom_nov = (d_nov.day_of_week == 0) ? 1 : (8 - d_nov.day_of_week);
-   d_nov.day = dom_nov;
-   datetime dst_fim = StructToTime(d_nov);
+   if(InpDST == DST_US)
+     {
+      // 2o domingo de marco as 02:00
+      MqlDateTime d_mar;
+      d_mar.year = ano; d_mar.mon = 3; d_mar.day = 1; d_mar.hour = 2; d_mar.min = 0; d_mar.sec = 0;
+      datetime t_mar1 = StructToTime(d_mar);
+      TimeToStruct(t_mar1, d_mar);
+      int dom_mar = (d_mar.day_of_week == 0) ? 8 : (15 - d_mar.day_of_week);
+      d_mar.day = dom_mar;
+      dst_ini = StructToTime(d_mar);
+
+      // 1o domingo de novembro as 02:00
+      MqlDateTime d_nov;
+      d_nov.year = ano; d_nov.mon = 11; d_nov.day = 1; d_nov.hour = 2; d_nov.min = 0; d_nov.sec = 0;
+      datetime t_nov1 = StructToTime(d_nov);
+      TimeToStruct(t_nov1, d_nov);
+      int dom_nov = (d_nov.day_of_week == 0) ? 1 : (8 - d_nov.day_of_week);
+      d_nov.day = dom_nov;
+      dst_fim = StructToTime(d_nov);
+     }
+   else if(InpDST == DST_EU)
+     {
+      // Ultimo domingo de marco as 02:00 servidor
+      MqlDateTime d_mar;
+      d_mar.year = ano; d_mar.mon = 3; d_mar.day = 31; d_mar.hour = 2; d_mar.min = 0; d_mar.sec = 0;
+      datetime t_mar31 = StructToTime(d_mar);
+      TimeToStruct(t_mar31, d_mar);
+      int dom_mar = 31 - d_mar.day_of_week;
+      d_mar.day = dom_mar;
+      dst_ini = StructToTime(d_mar);
+
+      // Ultimo domingo de outubro as 02:00 servidor
+      MqlDateTime d_out;
+      d_out.year = ano; d_out.mon = 10; d_out.day = 31; d_out.hour = 2; d_out.min = 0; d_out.sec = 0;
+      datetime t_out31 = StructToTime(d_out);
+      TimeToStruct(t_out31, d_out);
+      int dom_out = 31 - d_out.day_of_week;
+      d_out.day = dom_out;
+      dst_fim = StructToTime(d_out);
+     }
 
    if(t >= dst_ini && t < dst_fim)
-      return(3); // GMT+3 no verao
-   return(2);    // GMT+2 no inverno
+      return(InpOffsetInverno + 1); // Horario de verao (+1h)
+
+   return(InpOffsetInverno);        // Horario de inverno
   }
 
 int HoraServidor(const datetime agora, const int hora_gmt)
