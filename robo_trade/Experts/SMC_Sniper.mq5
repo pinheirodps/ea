@@ -1,15 +1,16 @@
 //+------------------------------------------------------------------+
-//|  SMC Sniper v3.5.2                                               |
+//|  SMC Sniper v3.5.20                                              |
 //|  Filtro H1: EMA + swing direcional para compra e venda          |
 //+------------------------------------------------------------------+
 #property copyright "SMC Sniper"
-#property version   "3.52"
+#property version   "3.70"
 #property strict
 
 #include <Trade\Trade.mqh>
 CTrade trade;
 
 input bool     Perfil_V27_Travado    = true; // Usa o perfil que teve PF 3.42 e ignora presets ruins
+input bool     Modo_Robusto_MultiAno = true; // Ignora gatilhos que ficaram bons so em 2025
 input double   Risco_Euros           = 3.0;
 input double   Risco_Prop_Euros      = 25.0; // Ataque controlado: 0.5% em conta de 5k
 input double   RR_Ratio              = 3.0;
@@ -19,6 +20,10 @@ input double   RR_Sniper_Forte       = 2.8;
 input double   Breakeven_Ratio       = 2.0;
 input double   Breakeven_Max_Efetivo = 1.2;  // Presets antigos com BE tarde deixam lucro voltar
 input double   Breakeven_Lock_R      = 0.25; // Ao proteger, trava parte do risco em lucro
+input bool     Breakeven_Lock_Dinamico = true; // Se o fluxo continua forte, protege mais lucro
+input double   Breakeven_Lock_R_Forte = 0.45;
+input double   Breakeven_Lock_RSI_Buy_Min = 55.0;
+input double   Breakeven_Lock_RSI_Sell_Max = 45.0;
 input int      OB_Lookback_H1        = 5;
 input bool     Usar_OB_M15_Sniper    = false; // Modo prop: M15 ficou negativo no diagnostico, manter desligado ate revalidar
 input int      OB_Lookback_M15       = 12;
@@ -30,6 +35,8 @@ input int      Timeout_Velas_M1      = 120;
 input int      Bloqueio_Horas_OB     = 4;
 input int      ATR_Period            = 14;
 input double   ATR_Sweep_Min         = 0.2;
+input bool     Usar_Sweep_Borda_OB_H1 = false; // Experimental: aumentou trades, mas perdeu edge no EURUSD 2025
+input double   Sweep_Borda_OB_ATR_Min = 0.15; // Mantem sweep da borda com deslocamento minimo real
 input double   ATR_Stop_Min          = 0.15;
 input double   ATR_Stop_Min_Max_Efetivo = 0.15; // Protege presets antigos demasiado restritivos
 input double   ATR_Stop_Max          = 5.0;
@@ -47,21 +54,33 @@ input double   RSI_Min_Entrada_Max_Efetivo = 52.0; // Mantem o filtro que funcio
 input double   RSI_Neutro            = 50.0;  // Linha de viragem de momentum
 input double   Displacement_ATR_M1   = 0.8;   // Candle de impulso minimo em ATR M1
 input double   Displacement_ATR_M1_Max_Efetivo = 0.8; // 0.6 trouxe ruido na v2.8
+input bool     Usar_Stop_Curto_Sniper = true; // Stop curto pode ser sniper se o impulso for muito limpo
+input bool     Stop_Curto_Apenas_London = true;
+input double   Stop_Curto_Min_Pontos = 25.0;
+input double   Stop_Curto_Displacement_ATR_M1 = 1.15;
+input double   Stop_Curto_Corpo_Min_Ratio = 0.70;
+input double   Stop_Curto_Fechamento_Extremo = 0.15;
 input bool     Filtro_Candle_Sniper  = true;  // Exige candle de confirmacao com corpo e fechamento fortes
 input double   Candle_Corpo_Min_Ratio= 0.55;  // Corpo minimo do candle de confirmacao
 input double   Candle_Fechamento_Extremo_Ratio = 0.25; // Fecha no quarto forte do candle
 input double   Candle_Corpo_RR_Forte = 0.70;  // Corpo para liberar alvo maior
 input double   Candle_Fechamento_RR_Forte = 0.15; // Fechamento extremo para alvo maior
+input bool     Usar_Confirmacao_Rastro_Sniper = true; // Pos-sweep: entrada mais rapida sem exigir CHoCH perfeito
+input double   Rastro_Displacement_ATR_M1 = 0.55;
+input double   Rastro_Corpo_Min_Ratio = 0.45;
+input double   Rastro_Fechamento_Extremo_Ratio = 0.35;
+input double   Rastro_RSI_Buy_Min = 58.0;
+input double   Rastro_RSI_Sell_Max = 42.0;
 input bool     Entrada_Direta_OB     = false; // Sem sweep: mais trades, menor qualidade
 input bool     Bloquear_OB_Apos_Trade= true;  // Evita insistir na mesma zona apos saida
-input bool     Usar_Asian_Sweep      = true;  // Novo POI H1: varredura da maxima/minima asiatica
+input bool     Usar_Asian_Sweep      = false; // Experimental: fora de 2025 ainda nao provou robustez
 input int      Asia_Inicio           = 0;
 input int      Asia_Fim              = 7;
 input int      Asian_Sweep_Inicio    = 8;     // Prioriza abertura Londres
 input int      Asian_Sweep_Fim       = 10;
 input double   Asian_Sweep_ATR_Min   = 0.15;  // Sweep minimo em ATR M1
 input double   Asian_Sweep_Stop_Max_Pontos = 90.0; // Sweep de sessao precisa ser rapido/sniper
-input bool     Usar_London_Sweep_NY  = true;  // Varre liquidez de Londres na abertura/miolo de NY
+input bool     Usar_London_Sweep_NY  = false; // Experimental: LONDON_SWEEP perdeu robustez fora de 2025
 input int      London_Range_Inicio   = 8;
 input int      London_Range_Fim      = 11;
 input int      London_Sweep_Inicio   = 13;
@@ -70,22 +89,42 @@ input double   London_Sweep_ATR_Min  = 0.15;
 input double   London_Sweep_Stop_Max_Pontos = 180.0; // Evita entrar tarde em varredura extensa
 input double   Session_Sweep_RSI_Buy_Min = 52.0;  // Sweeps alternativos exigem momentum claro
 input double   Session_Sweep_RSI_Sell_Max = 48.0;
+input bool     Usar_Filtro_Momentum_NY = true; // NY precisa confirmar direcao, evita entrada neutra
+input double   NY_RSI_Buy_Min       = 52.0;
+input double   NY_RSI_Sell_Max      = 46.0;
+input bool     Usar_FVG_H1           = false; // Desligado: FVG H1 adicionou frequencia, mas perdeu edge no EURUSD 2025
+input int      FVG_Lookback_H1       = 24;
+input double   FVG_Min_Pontos        = 8.0;
+input double   FVG_Max_Pontos        = 120.0;
 input bool     Usar_Filtro_Sessao    = true;
 input int      Sessao1_Inicio        = 8;     // Abertura Londres
 input int      Sessao1_Fim           = 10;
 input int      Sessao1_Fim_Min_Efetivo = 10;  // Nao estender sem validacao
+input bool     Usar_FollowThrough_London_H1 = true; // Da tempo extra apenas para sweep H1 classico ja formado em Londres
+input int      FollowThrough_London_Fim = 11;
+input int      FollowThrough_London_Fim_Forte = 12; // Ate 12h apenas com RSI muito direcional
+input double   FollowThrough_RSI_Buy_Min = 58.0;
+input double   FollowThrough_RSI_Sell_Max = 42.0;
+input double   FollowThrough_London_Stop_Max_Pontos = 130.0;
 input int      Sessao2_Inicio        = 13;    // Abertura America/NY
 input int      Sessao2_Fim           = 16;
 input int      Sessao2_Fim_Min_Efetivo = 16;  // Nao estender sem validacao
+input bool     Operar_Apenas_Sessao1 = false; // Teste baseline: desliga Sessao2/NY. Follow-through de Londres (ate 11-12h) continua ativo.
+input bool     Permitir_London_Sweep_NY_Em_Robusto = false; // Libera Usar_London_Sweep_NY mesmo com Modo_Robusto_MultiAno ativo, p/ teste A/B
+input bool     Usar_Bloqueio_Horario_Fixo_Noticia = false; // Bloqueio por horario de servidor, independente do CSV de noticias
+input int      Bloqueio_Horario_Fixo_Inicio_Min = 915; // Formato HMM (ex: 915 = 09:15, 1515 = 15:15)
+input int      Bloqueio_Horario_Fixo_Fim_Min   = 1000; // Formato HMM (ex: 1000 = 10:00, 1600 = 16:00)
 input int      Tendencia_EMA_H1      = 20;   // EMA H1 usada como filtro direcional
 input int      Tendencia_Lookback_H1 = 40;   // Velas H1 para procurar os dois swing highs
 input int      Tendencia_Swing_Lados = 2;    // Velas de cada lado para confirmar swing high
 input double   Tendencia_EMA_Buffer_Pontos = 10.0; // Evita alternar BUY/SELL colado na EMA
 input bool     Tendencia_Exigir_EMA_Inclinada = true;
 input int      Magic                 = 20260201;
+input bool     Magic_Auto_Por_Simbolo = true; // Portfolio: magic separado para cada ativo
 input int      Max_Spread_Pontos     = 25;   // Protecao v3.5: evita entrada com spread ruim
 input bool     Salvar_Log_CSV        = true; // Diagnostico leve, sem alterar entrada
 input string   Nome_Arquivo_CSV      = "SMC_Sniper_Log.csv";
+input bool     CSV_Limpar_No_Inicio  = false; // Portfolio: preserve varios simbolos no mesmo diagnostico
 input bool     Modo_Mesa_Proprietaria = true; // Controle de risco/consistencia para prop firm
 input double   Prop_Conta_Base       = 5000.0; // Blue Guardian Instant Standard mostrado pelo usuario
 input double   Prop_Max_Daily_Loss_Pct = 3.0;
@@ -94,6 +133,8 @@ input double   Prop_Usar_Limite_Pct  = 0.70; // Buffer: usa 70% da regra e para 
 input double   Prop_Max_Perda_Dia_Euros = 0.0; // 0 = usa percentual; >0 = limite absoluto adicional
 input int      Prop_Reset_Hora_Servidor = 22; // Ajustar para o horario do reset diario da conta
 input int      Prop_Max_Trades_Dia   = 3;
+input bool     Prop_CircuitBreaker_Semanal = true; // Para de insistir quando o regime da semana fica ruim
+input int      Prop_Max_Perdas_Consecutivas_Semana = 2;
 input bool     Prop_Bloquear_Sexta_Tarde = true;
 input int      Prop_Sexta_Hora_Limite = 17;
 input bool     Usar_Filtro_Noticias  = true; // Blue Guardian: evitar janela de noticias high impact
@@ -112,21 +153,27 @@ datetime g_ob_time=0;
 double   g_swing_low_ref=0, g_swing_high_ref=0, g_sweep_low=0, g_sweep_high=0;
 int      g_direcao=1;
 string   g_ob_tf="NA";
+string   g_sweep_sessao="NA";
 bool     g_breakeven_feito=false;
+bool     g_confirmacao_rastro_atual=false;
 int      g_velas_na_zona=0;
 datetime g_ultima_vela_m1=0;
 int      g_atr_handle=INVALID_HANDLE;
 int      g_atr_m1_handle=INVALID_HANDLE;
 int      g_ema_h1_handle=INVALID_HANDLE;
 int      g_rsi_handle=INVALID_HANDLE;
+int      g_magic_efetivo=0;
 datetime g_bloqueio_ob_time[20];
 datetime g_bloqueio_expira[20];
 int      g_bloqueio_count=0;
 int      g_dia_controle=-1;
 int      g_trades_dia=0;
+int      g_semana_controle=-1;
+int      g_perdas_consecutivas_semana=0;
 double   g_anchor_diario=0;
 double   g_equity_max_conta=0;
 bool     g_bloqueado_dia=false;
+bool     g_bloqueado_semana=false;
 bool     g_bloqueado_conta=false;
 bool     g_noticias_carregadas=false;
 bool     g_noticias_falha=false;
@@ -139,9 +186,19 @@ int      g_london_dia=-1;
 double   g_london_high=0;
 double   g_london_low=0;
 bool     g_london_sweep_usado=false;
+int      g_dbg_zonas_h1=0;
+int      g_dbg_zonas_fvg=0;
+int      g_dbg_sweeps=0;
+int      g_dbg_sweeps_borda_ob=0;
+int      g_dbg_entradas=0;
+int      g_dbg_timeout_zona=0;
+int      g_dbg_timeout_confirmacao=0;
+int      g_dbg_stop_curto=0;
+int      g_dbg_stop_largo=0;
 
 struct DiagnosticoTrade
 {
+   string   simbolo;
    datetime hora_entrada;
    string   direcao;
    string   sessao;
@@ -190,6 +247,19 @@ double Risco_Efetivo()
    return Risco_Euros;
 }
 
+int MagicEfetivo()
+{
+   if(!Magic_Auto_Por_Simbolo)
+      return Magic;
+
+   int hash=0;
+   int len=StringLen(_Symbol);
+   for(int i=0;i<len;i++){
+      hash=(hash*31+StringGetCharacter(_Symbol,i))%900000;
+   }
+   return Magic+hash;
+}
+
 double RSI_Min_Efetivo()
 {
    if(Perfil_V27_Travado) return 52.0;
@@ -216,6 +286,25 @@ bool UsarOBM15Efetivo()
 {
    if(Perfil_V27_Travado || Modo_Mesa_Proprietaria) return false;
    return Usar_OB_M15_Sniper;
+}
+
+bool UsarAsianSweepEfetivo()
+{
+   if(Modo_Robusto_MultiAno) return false;
+   return Usar_Asian_Sweep;
+}
+
+bool UsarLondonSweepEfetivo()
+{
+   if(Operar_Apenas_Sessao1) return false;
+   if(Modo_Robusto_MultiAno && !Permitir_London_Sweep_NY_Em_Robusto) return false;
+   return Usar_London_Sweep_NY;
+}
+
+bool UsarFollowThroughEfetivo()
+{
+   if(Modo_Robusto_MultiAno) return false;
+   return Usar_FollowThrough_London_H1;
 }
 
 bool UsarFiltroNoticiasEfetivo()
@@ -354,9 +443,31 @@ void CarregarNoticiasCSV()
          " | offset CSV->servidor: ",Noticias_CSV_Para_Servidor_Horas,"h");
 }
 
+bool DentroHorarioFixoNoticia(datetime agora)
+{
+   if(!Usar_Bloqueio_Horario_Fixo_Noticia) return false;
+
+   MqlDateTime dt;
+   TimeToStruct(agora,dt);
+   int agora_hmm=dt.hour*100+dt.min;
+
+   int ini=Bloqueio_Horario_Fixo_Inicio_Min;
+   int fim=Bloqueio_Horario_Fixo_Fim_Min;
+   if(ini==fim) return false;
+
+   if(ini<fim) return (agora_hmm>=ini && agora_hmm<=fim);
+   return (agora_hmm>=ini || agora_hmm<=fim); // janela cruza a meia-noite
+}
+
 bool DentroJanelaNoticia(datetime agora, string &motivo)
 {
    motivo="";
+
+   if(DentroHorarioFixoNoticia(agora)){
+      motivo="Bloqueio horario fixo de noticia (janela configurada)";
+      return true;
+   }
+
    if(!UsarFiltroNoticiasEfetivo()) return false;
 
    if(!g_noticias_carregadas){
@@ -390,7 +501,18 @@ void IniciarDiagnosticoCSV()
 {
    if(!Salvar_Log_CSV) return;
 
-   string header="Hora_Entrada,Direcao,Sessao,OB_TF,ATR_H1,ATR_M1,RSI,Stop_Pts,RR_Efetivo,Spread_Entrada,Hora_Saida,Resultado,Lucro_R,Motivo_Saida\n";
+   string header="Simbolo,Hora_Entrada,Direcao,Sessao,OB_TF,ATR_H1,ATR_M1,RSI,Stop_Pts,RR_Efetivo,Spread_Entrada,Hora_Saida,Resultado,Lucro_R,Motivo_Saida\n";
+   if(CSV_Limpar_No_Inicio){
+      int clean=FileOpen(Nome_Arquivo_CSV,FILE_WRITE|FILE_CSV|FILE_COMMON|FILE_ANSI,',');
+      if(clean==INVALID_HANDLE){
+         Print("ERRO ao limpar CSV diagnostico: ",GetLastError());
+         return;
+      }
+      FileWriteString(clean,header);
+      FileClose(clean);
+      return;
+   }
+
    int handle=FileOpen(Nome_Arquivo_CSV,FILE_READ|FILE_WRITE|FILE_CSV|FILE_COMMON|FILE_ANSI,',');
    if(handle==INVALID_HANDLE)
       handle=FileOpen(Nome_Arquivo_CSV,FILE_WRITE|FILE_CSV|FILE_COMMON|FILE_ANSI,',');
@@ -416,11 +538,12 @@ void PrepararDiagnosticoEntrada(string direcao, double atr_h1, double atr_m1,
                                 double rsi, double stop_pts, double rr_efetivo,
                                 long spread_pts)
 {
-   if(!Salvar_Log_CSV) return;
-
    g_diag.hora_entrada=TimeCurrent();
+   g_diag.simbolo=_Symbol;
    g_diag.direcao=direcao;
    g_diag.sessao=SessaoAtual();
+   if(g_diag.sessao=="OUTSIDE" && DentroHorarioFollowThroughLondon())
+      g_diag.sessao="LONDON_FT";
    g_diag.ob_tf=g_ob_tf;
    g_diag.atr_h1=atr_h1;
    g_diag.atr_m1=atr_m1;
@@ -446,7 +569,8 @@ void SalvarDiagnosticoCSV()
    }
 
    FileSeek(handle,0,SEEK_END);
-   string linha=StringFormat("%s,%s,%s,%s,%.5f,%.5f,%.2f,%.1f,%.2f,%d,%s,%s,%.2f,%s",
+   string linha=StringFormat("%s,%s,%s,%s,%s,%.5f,%.5f,%.2f,%.1f,%.2f,%d,%s,%s,%.2f,%s",
+      g_diag.simbolo,
       TimeToString(g_diag.hora_entrada,TIME_DATE|TIME_SECONDS),
       g_diag.direcao,
       g_diag.sessao,
@@ -464,18 +588,36 @@ void SalvarDiagnosticoCSV()
    );
    FileWriteString(handle,linha+"\n");
    FileClose(handle);
-   g_diag_ativo=false;
+}
+
+void RegistrarResultadoTrade(double lucro)
+{
+   if(!Modo_Mesa_Proprietaria || !Prop_CircuitBreaker_Semanal)
+      return;
+
+   if(lucro<0)
+      g_perdas_consecutivas_semana++;
+   else
+      g_perdas_consecutivas_semana=0;
+
+   if(Prop_Max_Perdas_Consecutivas_Semana>0 &&
+      g_perdas_consecutivas_semana>=Prop_Max_Perdas_Consecutivas_Semana){
+      g_bloqueado_semana=true;
+      Print("Prop guard: circuit breaker semanal acionado apos ",
+            g_perdas_consecutivas_semana,
+            " perdas consecutivas. Novas entradas bloqueadas ate a proxima semana.");
+   }
 }
 
 void FinalizarDiagnosticoSeFechou()
 {
-   if(!Salvar_Log_CSV || !g_diag_ativo) return;
+   if(!g_diag_ativo) return;
    if(!HistorySelect(g_diag.hora_entrada,TimeCurrent())) return;
 
    for(int i=HistoryDealsTotal()-1;i>=0;i--){
       ulong deal=HistoryDealGetTicket(i);
       if(deal==0) continue;
-      if(HistoryDealGetInteger(deal,DEAL_MAGIC)!=Magic) continue;
+      if(HistoryDealGetInteger(deal,DEAL_MAGIC)!=g_magic_efetivo) continue;
       if(HistoryDealGetString(deal,DEAL_SYMBOL)!=_Symbol) continue;
       long entry=HistoryDealGetInteger(deal,DEAL_ENTRY);
       if(entry!=DEAL_ENTRY_OUT && entry!=DEAL_ENTRY_INOUT) continue;
@@ -488,7 +630,9 @@ void FinalizarDiagnosticoSeFechou()
       double risco_ref=Risco_Efetivo();
       g_diag.lucro_r=(risco_ref>0 ? lucro/risco_ref : 0);
       g_diag.motivo_saida=(lucro>0 ? "TP/PROFIT" : (lucro<0 ? "SL/LOSS" : "BE"));
+      RegistrarResultadoTrade(lucro);
       SalvarDiagnosticoCSV();
+      g_diag_ativo=false;
       return;
    }
 }
@@ -529,8 +673,28 @@ int ChaveDiaCalendario(datetime agora)
    return dt.year*1000+dt.day_of_year;
 }
 
+int ChaveSemanaCalendario(datetime agora)
+{
+   MqlDateTime dt;
+   TimeToStruct(agora,dt);
+   return dt.year*100+(dt.day_of_year/7);
+}
+
+void AtualizarControleSemanal()
+{
+   int chave=ChaveSemanaCalendario(TimeCurrent());
+   if(chave==g_semana_controle) return;
+
+   g_semana_controle=chave;
+   g_perdas_consecutivas_semana=0;
+   g_bloqueado_semana=false;
+   Print("Prop guard: nova semana operacional. Circuit breaker resetado.");
+}
+
 void AtualizarControleDiario()
 {
+   AtualizarControleSemanal();
+
    double equity=AccountInfoDouble(ACCOUNT_EQUITY);
 
    if(g_equity_max_conta<=0 || equity>g_equity_max_conta)
@@ -595,19 +759,23 @@ bool PropRiscoFinanceiroAtingido()
 
 bool MesaProprietariaPermiteEntrada()
 {
-   if(!Modo_Mesa_Proprietaria) return true;
-
-   AtualizarControleDiario();
-
-   if(g_bloqueado_conta) return false;
-   if(PropRiscoFinanceiroAtingido()) return false;
-
    string motivo_noticia="";
    if(DentroJanelaNoticia(TimeCurrent(),motivo_noticia)){
       if(!g_bloqueado_dia)
          Print("NEWS FILTER: entrada bloqueada | ",motivo_noticia);
       return false;
    }
+
+   if(!Modo_Mesa_Proprietaria) return true;
+
+   AtualizarControleDiario();
+
+   if(g_bloqueado_conta) return false;
+   if(g_bloqueado_semana){
+      Print("Prop guard: semana bloqueada pelo circuit breaker. Sem novas entradas.");
+      return false;
+   }
+   if(PropRiscoFinanceiroAtingido()) return false;
 
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(),dt);
@@ -632,7 +800,8 @@ bool MesaProprietariaPermiteEntrada()
 //+------------------------------------------------------------------+
 int OnInit()
 {
-   trade.SetExpertMagicNumber(Magic);
+   g_magic_efetivo=MagicEfetivo();
+   trade.SetExpertMagicNumber(g_magic_efetivo);
    trade.SetDeviationInPoints(10);
    g_estado=SCANNING; g_bloqueio_count=0;
    g_atr_handle=iATR(_Symbol,PERIOD_H1,ATR_Period);
@@ -647,7 +816,10 @@ int OnInit()
    IniciarDiagnosticoCSV();
    CarregarNoticiasCSV();
    AtualizarControleDiario();
-   Print("SMC Sniper v3.5.1 | Big player trail: OB buy/sell + sweep + displacement + RSI TF");
+   Print("SMC Sniper v3.5.20 | Big player trail: OB H1 + sweep + displacement + RSI TF + NY momentum + robust multi-year mode");
+   Print("MAGIC EFETIVO | simbolo: ",_Symbol," | magic: ",g_magic_efetivo);
+   if(Modo_Robusto_MultiAno)
+      Print("MODO ROBUSTO MULTI-ANO ATIVO | session sweeps e follow-through experimental ignorados.");
    if(Perfil_V27_Travado)
       Print("PERFIL V2.7 TRAVADO | RSI M30 | RSI min 52 | displacement 0.8 | sessoes sem extensao");
    if(Filtro_Candle_Sniper)
@@ -698,11 +870,11 @@ int OnInit()
             "% | Max: ",DoubleToString(Prop_Max_Loss_Pct,2),
             "% | Uso interno: ",DoubleToString(PropLimiteUso()*100.0,1),
             "% | Reset servidor: ",Prop_Reset_Hora_Servidor);
-   if(Usar_Asian_Sweep)
+   if(UsarAsianSweepEfetivo())
       Print("ASIAN SWEEP ATIVO | Asia: ",Asia_Inicio,"-",Asia_Fim,
             " | gatilho: ",Asian_Sweep_Inicio,"-",Asian_Sweep_Fim,
             " | sweep ATR M1 min: ",DoubleToString(Asian_Sweep_ATR_Min,2));
-   if(Usar_London_Sweep_NY)
+   if(UsarLondonSweepEfetivo())
       Print("LONDON SWEEP NY ATIVO | range: ",London_Range_Inicio,"-",London_Range_Fim,
             " | gatilho: ",London_Sweep_Inicio,"-",London_Sweep_Fim,
             " | sweep ATR M1 min: ",DoubleToString(London_Sweep_ATR_Min,2));
@@ -713,6 +885,16 @@ int OnInit()
 
 void OnDeinit(const int reason)
 {
+   Print("DIAGNOSTICO SMC | zonas H1: ",g_dbg_zonas_h1,
+          " | zonas FVG: ",g_dbg_zonas_fvg,
+          " | sweeps: ",g_dbg_sweeps,
+          " | sweeps borda OB: ",g_dbg_sweeps_borda_ob,
+          " | entradas: ",g_dbg_entradas,
+         " | timeout zona: ",g_dbg_timeout_zona,
+         " | timeout confirmacao: ",g_dbg_timeout_confirmacao,
+         " | stop curto: ",g_dbg_stop_curto,
+         " | stop largo: ",g_dbg_stop_largo);
+
    if(g_atr_handle!=INVALID_HANDLE) IndicatorRelease(g_atr_handle);
    if(g_atr_m1_handle!=INVALID_HANDLE) IndicatorRelease(g_atr_m1_handle);
    if(g_ema_h1_handle!=INVALID_HANDLE) IndicatorRelease(g_ema_h1_handle);
@@ -851,16 +1033,49 @@ bool DentroHorarioEntrada()
    int h=dt.hour;
 
    int fim1=SessaoFim1_Efetivo();
-   int fim2=SessaoFim2_Efetivo();
-
    bool sessao1=(h>=Sessao1_Inicio && h<=fim1);
+   if(Operar_Apenas_Sessao1) return sessao1;
+
+   int fim2=SessaoFim2_Efetivo();
    bool sessao2=(h>=Sessao2_Inicio && h<=fim2);
    return (sessao1 || sessao2);
 }
 
+bool DentroHorarioFollowThroughLondon()
+{
+   if(!UsarFollowThroughEfetivo() || !Usar_Filtro_Sessao) return false;
+   if(g_ob_tf!="H1" || g_sweep_sessao!="LONDON") return false;
+
+   MqlDateTime dt;
+   TimeToStruct(TimeCurrent(),dt);
+   int h=dt.hour;
+
+   int fim=FollowThrough_London_Fim;
+   int fim_forte=FollowThrough_London_Fim_Forte;
+   if(fim_forte<fim) fim_forte=fim;
+
+   if(fim<=Sessao1_Fim) return false;
+   if(h<=Sessao1_Fim || h>fim_forte) return false;
+   if(h>=Sessao2_Inicio) return false;
+
+   if(h>fim){
+      double rsi[1];
+      if(CopyBuffer(g_rsi_handle,0,1,1,rsi)<1) return false;
+      if(g_direcao==1 && rsi[0]<FollowThrough_RSI_Buy_Min) return false;
+      if(g_direcao==-1 && rsi[0]>FollowThrough_RSI_Sell_Max) return false;
+   }
+
+   return true;
+}
+
+bool DentroHorarioEntradaOuFollowThrough()
+{
+   return (DentroHorarioEntrada() || DentroHorarioFollowThroughLondon());
+}
+
 bool DentroHorarioAsianSweep()
 {
-   if(!Usar_Asian_Sweep) return false;
+   if(!UsarAsianSweepEfetivo()) return false;
 
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(),dt);
@@ -869,7 +1084,7 @@ bool DentroHorarioAsianSweep()
 
 void AtualizarRangeAsia()
 {
-   if(!Usar_Asian_Sweep) return;
+   if(!UsarAsianSweepEfetivo()) return;
 
    datetime vela=iTime(_Symbol,PERIOD_M1,1);
    if(vela<=0) return;
@@ -896,7 +1111,7 @@ void AtualizarRangeAsia()
 
 bool ProcurarAsianSweep()
 {
-   if(!Usar_Asian_Sweep || g_asia_sweep_usado) return false;
+   if(!UsarAsianSweepEfetivo() || g_asia_sweep_usado) return false;
    if(!DentroHorarioAsianSweep()) return false;
    if(g_asia_high<=0 || g_asia_low<=0) return false;
 
@@ -951,7 +1166,7 @@ bool ProcurarAsianSweep()
 
 bool DentroHorarioLondonSweep()
 {
-   if(!Usar_London_Sweep_NY) return false;
+   if(!UsarLondonSweepEfetivo()) return false;
 
    MqlDateTime dt;
    TimeToStruct(TimeCurrent(),dt);
@@ -960,7 +1175,7 @@ bool DentroHorarioLondonSweep()
 
 void AtualizarRangeLondon()
 {
-   if(!Usar_London_Sweep_NY) return;
+   if(!UsarLondonSweepEfetivo()) return;
 
    datetime vela=iTime(_Symbol,PERIOD_M1,1);
    if(vela<=0) return;
@@ -987,7 +1202,7 @@ void AtualizarRangeLondon()
 
 bool ProcurarLondonSweep()
 {
-   if(!Usar_London_Sweep_NY || g_london_sweep_usado) return false;
+   if(!UsarLondonSweepEfetivo() || g_london_sweep_usado) return false;
    if(!DentroHorarioLondonSweep()) return false;
    if(g_london_high<=0 || g_london_low<=0) return false;
 
@@ -1082,7 +1297,9 @@ void ResetEstado()
    g_swing_low_ref=0; g_swing_high_ref=0; g_sweep_low=0; g_sweep_high=0;
    g_direcao=1;
    g_ob_tf="NA";
+   g_sweep_sessao="NA";
    g_velas_na_zona=0; g_breakeven_feito=false;
+   g_confirmacao_rastro_atual=false;
 }
 
 bool TemPosicaoAberta()
@@ -1090,7 +1307,7 @@ bool TemPosicaoAberta()
    for(int i=PositionsTotal()-1;i>=0;i--){
       ulong t=PositionGetTicket(i);
       if(!PositionSelectByTicket(t)) continue;
-      if(PositionGetInteger(POSITION_MAGIC)==Magic && PositionGetString(POSITION_SYMBOL)==_Symbol) return true;
+      if(PositionGetInteger(POSITION_MAGIC)==g_magic_efetivo && PositionGetString(POSITION_SYMBOL)==_Symbol) return true;
    }
    return false;
 }
@@ -1155,13 +1372,33 @@ void FixarSwings()
    }
 }
 
+bool MomentumProtecaoForte(long tipo,double &rsi_atual)
+{
+   rsi_atual=0.0;
+   if(!Breakeven_Lock_Dinamico || g_rsi_handle==INVALID_HANDLE)
+      return false;
+
+   double rsi[2];
+   if(CopyBuffer(g_rsi_handle,0,1,2,rsi)<2)
+      return false;
+
+   rsi_atual=rsi[0];
+   if(tipo==POSITION_TYPE_BUY)
+      return (rsi[0]>=Breakeven_Lock_RSI_Buy_Min || (rsi[0]>RSI_Neutro && rsi[0]>rsi[1]));
+
+   if(tipo==POSITION_TYPE_SELL)
+      return (rsi[0]<=Breakeven_Lock_RSI_Sell_Max || (rsi[0]<RSI_Neutro && rsi[0]<rsi[1]));
+
+   return false;
+}
+
 void GerirBreakeven()
 {
    if(g_breakeven_feito) return;
    for(int i=PositionsTotal()-1;i>=0;i--){
       ulong ticket=PositionGetTicket(i);
       if(!PositionSelectByTicket(ticket)) continue;
-      if(PositionGetInteger(POSITION_MAGIC)!=Magic) continue;
+      if(PositionGetInteger(POSITION_MAGIC)!=g_magic_efetivo) continue;
       if(PositionGetString(POSITION_SYMBOL)!=_Symbol) continue;
       long tipo=PositionGetInteger(POSITION_TYPE);
       double ep=PositionGetDouble(POSITION_PRICE_OPEN);
@@ -1173,14 +1410,23 @@ void GerirBreakeven()
          be_ratio_efetivo=Breakeven_Max_Efetivo;
       double lock_r=Breakeven_Lock_R;
       if(lock_r<0) lock_r=0;
+      double rsi_protecao=0.0;
+      bool lock_dinamico=MomentumProtecaoForte(tipo,rsi_protecao);
+      if(lock_dinamico && Breakeven_Lock_R_Forte>lock_r)
+         lock_r=Breakeven_Lock_R_Forte;
 
       if(tipo==POSITION_TYPE_BUY && (bid-ep)>=(ep-sl)*be_ratio_efetivo){
          double nsl=NormalizeDouble(ep+(ep-sl)*lock_r,_Digits);
          if(sl<nsl){
             trade.PositionModify(ticket,nsl,PositionGetDouble(POSITION_TP));
             g_breakeven_feito=true;
-            Print(">>> PROTECAO LUCRO em ",nsl,
-                  " | lock: ",DoubleToString(lock_r,2),"R");
+            if(lock_dinamico)
+               Print(">>> PROTECAO LUCRO em ",nsl,
+                     " | lock: ",DoubleToString(lock_r,2),"R",
+                     " | dinamico RSI: ",DoubleToString(rsi_protecao,2));
+            else
+               Print(">>> PROTECAO LUCRO em ",nsl,
+                     " | lock: ",DoubleToString(lock_r,2),"R");
          }
       }
       else if(tipo==POSITION_TYPE_SELL && (ep-ask)>=(sl-ep)*be_ratio_efetivo){
@@ -1188,8 +1434,13 @@ void GerirBreakeven()
          if(sl>nsl){
             trade.PositionModify(ticket,nsl,PositionGetDouble(POSITION_TP));
             g_breakeven_feito=true;
-            Print(">>> PROTECAO LUCRO em ",nsl,
-                  " | lock: ",DoubleToString(lock_r,2),"R");
+            if(lock_dinamico)
+               Print(">>> PROTECAO LUCRO em ",nsl,
+                     " | lock: ",DoubleToString(lock_r,2),"R",
+                     " | dinamico RSI: ",DoubleToString(rsi_protecao,2));
+            else
+               Print(">>> PROTECAO LUCRO em ",nsl,
+                     " | lock: ",DoubleToString(lock_r,2),"R");
          }
       }
    }
@@ -1224,6 +1475,7 @@ void ProcurarOB()
       if(preco>=l && preco<=o){
          g_ob_low=l; g_ob_high=o; g_ob_time=ot; g_direcao=1; g_ob_tf="H1";
          g_estado=EM_ZONA; g_velas_na_zona=0;
+         g_dbg_zonas_h1++;
          FixarSwings();
          Print(">>> ZONA OB H1 | ",DoubleToString(l,_Digits)," - ",DoubleToString(o,_Digits),
                " | ATR H1: ",DoubleToString(atr/_Point,1)," pts | Tendência: ALTA");
@@ -1245,6 +1497,7 @@ void ProcurarOB()
          if(preco>=o && preco<=h){
             g_ob_low=o; g_ob_high=h; g_ob_time=ot; g_direcao=-1; g_ob_tf="H1";
             g_estado=EM_ZONA; g_velas_na_zona=0;
+            g_dbg_zonas_h1++;
             FixarSwings();
             Print(">>> ZONA OB H1 SELL | ",DoubleToString(o,_Digits)," - ",DoubleToString(h,_Digits),
                   " | ATR H1: ",DoubleToString(atr/_Point,1)," pts | Tendencia: BAIXA");
@@ -1267,6 +1520,7 @@ void ProcurarOB()
             if(preco>=l && preco<=o){
                g_ob_low=l; g_ob_high=o; g_ob_time=ot; g_direcao=1; g_ob_tf="M15";
                g_estado=EM_ZONA; g_velas_na_zona=0;
+               g_dbg_zonas_h1++;
                FixarSwings();
                Print(">>> ZONA OB M15 | ",DoubleToString(l,_Digits)," - ",DoubleToString(o,_Digits),
                      " | ATR H1: ",DoubleToString(atr/_Point,1)," pts | Tendencia: ALTA");
@@ -1288,6 +1542,7 @@ void ProcurarOB()
             if(preco>=o && preco<=h){
                g_ob_low=o; g_ob_high=h; g_ob_time=ot; g_direcao=-1; g_ob_tf="M15";
                g_estado=EM_ZONA; g_velas_na_zona=0;
+               g_dbg_zonas_h1++;
                FixarSwings();
                Print(">>> ZONA OB M15 SELL | ",DoubleToString(o,_Digits)," - ",DoubleToString(h,_Digits),
                      " | ATR H1: ",DoubleToString(atr/_Point,1)," pts | Tendencia: BAIXA");
@@ -1301,13 +1556,93 @@ void ProcurarOB()
 //+------------------------------------------------------------------+
 //| ESTADO 2 — Dentro do OB, aguarda Sweep no M1                  |
 //+------------------------------------------------------------------+
+void ProcurarFVG_H1()
+{
+   if(!Usar_FVG_H1) return;
+   if(!DentroHorarioEntrada()) return;
+   if(!ATRContextoValido()) return;
+
+   bool tendencia_alta=TendenciaDeAlta();
+   bool tendencia_baixa=TendenciaDeBaixa();
+   if(!tendencia_alta && !tendencia_baixa) return;
+
+   double preco=SymbolInfoDouble(_Symbol,SYMBOL_BID);
+   double atr=ObterATR();
+   int lookback=FVG_Lookback_H1;
+   if(lookback<3) lookback=3;
+
+   if(tendencia_alta){
+      for(int newer=1;newer<=lookback;newer++){
+         int older=newer+2;
+         double older_high=iHigh(_Symbol,PERIOD_H1,older);
+         double newer_low=iLow(_Symbol,PERIOD_H1,newer);
+         if(older_high<=0 || newer_low<=0) continue;
+         if(newer_low<=older_high) continue;
+
+         double gap_pts=(newer_low-older_high)/_Point;
+         if(gap_pts<FVG_Min_Pontos || gap_pts>FVG_Max_Pontos) continue;
+         datetime ft=iTime(_Symbol,PERIOD_H1,newer+1);
+         if(OB_Bloqueado(ft)) continue;
+
+         if(preco>=older_high && preco<=newer_low){
+            g_ob_low=older_high;
+            g_ob_high=newer_low;
+            g_ob_time=ft;
+            g_direcao=1;
+            g_ob_tf="FVG_H1";
+            g_estado=EM_ZONA;
+            g_velas_na_zona=0;
+            g_dbg_zonas_fvg++;
+            FixarSwings();
+            Print(">>> ZONA FVG H1 BUY | ",DoubleToString(g_ob_low,_Digits),
+                  " - ",DoubleToString(g_ob_high,_Digits),
+                  " | gap: ",DoubleToString(gap_pts,1),
+                  " pts | ATR H1: ",DoubleToString(atr/_Point,1)," pts");
+            return;
+         }
+      }
+   }
+
+   if(tendencia_baixa){
+      for(int newer=1;newer<=lookback;newer++){
+         int older=newer+2;
+         double older_low=iLow(_Symbol,PERIOD_H1,older);
+         double newer_high=iHigh(_Symbol,PERIOD_H1,newer);
+         if(older_low<=0 || newer_high<=0) continue;
+         if(newer_high>=older_low) continue;
+
+         double gap_pts=(older_low-newer_high)/_Point;
+         if(gap_pts<FVG_Min_Pontos || gap_pts>FVG_Max_Pontos) continue;
+         datetime ft=iTime(_Symbol,PERIOD_H1,newer+1);
+         if(OB_Bloqueado(ft)) continue;
+
+         if(preco>=newer_high && preco<=older_low){
+            g_ob_low=newer_high;
+            g_ob_high=older_low;
+            g_ob_time=ft;
+            g_direcao=-1;
+            g_ob_tf="FVG_H1";
+            g_estado=EM_ZONA;
+            g_velas_na_zona=0;
+            g_dbg_zonas_fvg++;
+            FixarSwings();
+            Print(">>> ZONA FVG H1 SELL | ",DoubleToString(g_ob_low,_Digits),
+                  " - ",DoubleToString(g_ob_high,_Digits),
+                  " | gap: ",DoubleToString(gap_pts,1),
+                  " pts | ATR H1: ",DoubleToString(atr/_Point,1)," pts");
+            return;
+         }
+      }
+   }
+}
+
 void MonitorarSweep()
 {
    double preco=SymbolInfoDouble(_Symbol,SYMBOL_BID);
    double atr_m1=ObterATRM1();
    if(atr_m1<=0) return;
    g_velas_na_zona++;
-   if(g_velas_na_zona>=Timeout_Velas_M1){ BloquearOB(g_ob_time); Print("Timeout. OB bloqueado."); ResetEstado(); return; }
+   if(g_velas_na_zona>=Timeout_Velas_M1){ g_dbg_timeout_zona++; BloquearOB(g_ob_time); Print("Timeout. OB bloqueado."); ResetEstado(); return; }
    if(preco<g_ob_low-10*_Point || preco>g_ob_high+10*_Point){ ResetEstado(); return; }
 
    if(Entrada_Direta_OB && g_direcao==1 && ConfirmacaoBigPlayer() && iClose(_Symbol,PERIOD_M1,1)>g_ob_high){
@@ -1325,15 +1660,30 @@ void MonitorarSweep()
 
    // Sweep e liquidez local sao medidos no M1.
    double atr_sweep = atr_m1 * ATR_Sweep_Min;
+   double atr_sweep_borda = atr_m1 * Sweep_Borda_OB_ATR_Min;
    double lv=iLow(_Symbol,PERIOD_M1,1), hv=iHigh(_Symbol,PERIOD_M1,1), cv=iClose(_Symbol,PERIOD_M1,1);
    if(g_direcao==1 && lv<(g_swing_low_ref - atr_sweep) && cv>g_swing_low_ref){
-      g_sweep_low=lv; g_estado=SWEEP_OK;
+      g_sweep_low=lv; g_sweep_sessao=SessaoAtual(); g_estado=SWEEP_OK; g_dbg_sweeps++;
       Print(">>> SWEEP | mín: ",DoubleToString(lv,_Digits),
             " | aguarda displacement + RSI");
    }
    else if(g_direcao==-1 && hv>(g_swing_high_ref + atr_sweep) && cv<g_swing_high_ref){
-      g_sweep_high=hv; g_estado=SWEEP_OK;
+      g_sweep_high=hv; g_sweep_sessao=SessaoAtual(); g_estado=SWEEP_OK; g_dbg_sweeps++;
       Print(">>> SWEEP SELL | max: ",DoubleToString(hv,_Digits),
+            " | aguarda displacement + RSI");
+   }
+   else if(Usar_Sweep_Borda_OB_H1 && g_ob_tf=="H1" && g_direcao==1 &&
+           lv<(g_ob_low - atr_sweep_borda) && cv>g_ob_low){
+      g_sweep_low=lv; g_ob_tf="H1_EDGE"; g_estado=SWEEP_OK; g_dbg_sweeps++; g_dbg_sweeps_borda_ob++;
+      Print(">>> SWEEP BORDA OB H1 BUY | borda: ",DoubleToString(g_ob_low,_Digits),
+            " | min: ",DoubleToString(lv,_Digits),
+            " | aguarda displacement + RSI");
+   }
+   else if(Usar_Sweep_Borda_OB_H1 && g_ob_tf=="H1" && g_direcao==-1 &&
+           hv>(g_ob_high + atr_sweep_borda) && cv<g_ob_high){
+      g_sweep_high=hv; g_ob_tf="H1_EDGE"; g_estado=SWEEP_OK; g_dbg_sweeps++; g_dbg_sweeps_borda_ob++;
+      Print(">>> SWEEP BORDA OB H1 SELL | borda: ",DoubleToString(g_ob_high,_Digits),
+            " | max: ",DoubleToString(hv,_Digits),
             " | aguarda displacement + RSI");
    }
 }
@@ -1383,6 +1733,49 @@ bool ConfirmacaoBigPlayer()
    return (candle_impulso && corpo_forte && fechamento_forte && quebrou_micro_low && rsi_momentum);
 }
 
+bool ConfirmacaoRastroSniper()
+{
+   if(!Usar_Confirmacao_Rastro_Sniper) return false;
+   if(g_ob_tf!="H1") return false;
+
+   double atr_m1=ObterATRM1();
+   if(atr_m1<=0) return false;
+
+   double rsi[2];
+   if(CopyBuffer(g_rsi_handle,0,1,2,rsi)<2) return false;
+
+   double o=iOpen(_Symbol,PERIOD_M1,1);
+   double c=iClose(_Symbol,PERIOD_M1,1);
+   double h=iHigh(_Symbol,PERIOD_M1,1);
+   double l=iLow(_Symbol,PERIOD_M1,1);
+   double h_anterior=iHigh(_Symbol,PERIOD_M1,2);
+   double l_anterior=iLow(_Symbol,PERIOD_M1,2);
+   double range=h-l;
+   if(range<=0) return false;
+
+   double corpo=MathAbs(c-o);
+   double corpo_ratio=corpo/range;
+   double fechamento_topo=(h-c)/range;
+   double fechamento_fundo=(c-l)/range;
+   double meio_ob=(g_ob_low+g_ob_high)/2.0;
+   bool candle_suficiente=(range>=atr_m1*Rastro_Displacement_ATR_M1);
+   bool corpo_suficiente=(corpo_ratio>=Rastro_Corpo_Min_Ratio);
+
+   if(g_direcao==1){
+      bool candle_buy=(c>o);
+      bool fechamento_ok=(fechamento_topo<=Rastro_Fechamento_Extremo_Ratio);
+      bool recuperou_zona=(c>meio_ob || c>h_anterior);
+      bool rsi_ok=(rsi[0]>=Rastro_RSI_Buy_Min);
+      return (candle_buy && candle_suficiente && corpo_suficiente && fechamento_ok && recuperou_zona && rsi_ok);
+   }
+
+   bool candle_sell=(c<o);
+   bool fechamento_ok=(fechamento_fundo<=Rastro_Fechamento_Extremo_Ratio);
+   bool recuperou_zona=(c<meio_ob || c<l_anterior);
+   bool rsi_ok=(rsi[0]<=Rastro_RSI_Sell_Max);
+   return (candle_sell && candle_suficiente && corpo_suficiente && fechamento_ok && recuperou_zona && rsi_ok);
+}
+
 bool SetupSessionSweep()
 {
    return (g_ob_tf=="ASIA_SWEEP" || g_ob_tf=="LONDON_SWEEP");
@@ -1390,8 +1783,17 @@ bool SetupSessionSweep()
 
 bool ConfirmacaoEntrada()
 {
-   if(!ConfirmacaoBigPlayer())
-      return false;
+   g_confirmacao_rastro_atual=false;
+   bool confirmacao_classica=ConfirmacaoBigPlayer();
+   bool confirmacao_rastro=false;
+
+   if(!confirmacao_classica){
+      confirmacao_rastro=ConfirmacaoRastroSniper();
+      if(!confirmacao_rastro)
+         return false;
+      g_confirmacao_rastro_atual=true;
+      Print(">>> CONFIRMACAO RASTRO SNIPER | entrada rapida pos-sweep H1");
+   }
 
    if(!SetupSessionSweep())
       return true;
@@ -1419,13 +1821,14 @@ bool ConfirmacaoEntrada()
 
 void VerificarCHoCH()
 {
-   if(!DentroHorarioEntrada()){ ResetEstado(); return; }
+   if(!DentroHorarioEntradaOuFollowThrough()){ ResetEstado(); return; }
 
    datetime va=iTime(_Symbol,PERIOD_M1,0);
    if(va!=g_ultima_vela_m1){
       g_ultima_vela_m1=va; g_velas_na_zona++;
       if(ConfirmacaoEntrada()){ ExecutarEntrada(); return; }
       if(g_velas_na_zona>=Timeout_Velas_M1){
+         g_dbg_timeout_confirmacao++;
          BloquearOB(g_ob_time);
          Print("Timeout displacement/RSI. OB bloqueado.");
          ResetEstado();
@@ -1433,12 +1836,42 @@ void VerificarCHoCH()
    }
 }
 
+bool FiltroMomentumNYPermite(double rsi_val,bool tem_rsi)
+{
+   if(!Usar_Filtro_Momentum_NY)
+      return true;
+
+   if(SessaoAtual()!="NY" || g_ob_tf!="H1")
+      return true;
+
+   if(!tem_rsi){
+      Print("Filtro NY rejeitou entrada: RSI indisponivel.");
+      return false;
+   }
+
+   if(g_direcao==1 && rsi_val<NY_RSI_Buy_Min){
+      Print("Filtro NY rejeitou BUY: RSI neutro/fraco (",
+            DoubleToString(rsi_val,2)," < ",
+            DoubleToString(NY_RSI_Buy_Min,2),").");
+      return false;
+   }
+
+   if(g_direcao==-1 && rsi_val>NY_RSI_Sell_Max){
+      Print("Filtro NY rejeitou SELL: RSI neutro/fraco (",
+            DoubleToString(rsi_val,2)," > ",
+            DoubleToString(NY_RSI_Sell_Max,2),").");
+      return false;
+   }
+
+   return true;
+}
+
 //+------------------------------------------------------------------+
 //| Executa a ordem                                                  |
 //+------------------------------------------------------------------+
 void ExecutarEntrada()
 {
-   if(!DentroHorarioEntrada()){ ResetEstado(); return; }
+   if(!DentroHorarioEntradaOuFollowThrough()){ ResetEstado(); return; }
    if(!MesaProprietariaPermiteEntrada()){ ResetEstado(); return; }
    if(!ATRContextoValido(true)){ ResetEstado(); return; }
 
@@ -1455,6 +1888,7 @@ void ExecutarEntrada()
    double entrada=(g_direcao==1 ? SymbolInfoDouble(_Symbol,SYMBOL_ASK) : SymbolInfoDouble(_Symbol,SYMBOL_BID));
    double sl=(g_direcao==1 ? g_sweep_low-3*_Point : g_sweep_high+3*_Point);
    double dist=(g_direcao==1 ? entrada-sl : sl-entrada);
+   bool manter_sweep_h1=(g_estado==SWEEP_OK && g_ob_tf=="H1");
 
    if((g_direcao==1 && (g_sweep_low<=0 || sl>=entrada)) ||
       (g_direcao==-1 && (g_sweep_high<=0 || sl<=entrada))){
@@ -1463,10 +1897,23 @@ void ExecutarEntrada()
             " | sweep low/high: ",DoubleToString(g_sweep_low,_Digits),"/",
             DoubleToString(g_sweep_high,_Digits),
             " | SL: ",DoubleToString(sl,_Digits));
+      if(manter_sweep_h1){
+         Print("Tentativa H1 ignorada por SL invalido; mantendo sweep para nova confirmacao.");
+         g_confirmacao_rastro_atual=false;
+         return;
+      }
       ResetEstado(); return;
    }
 
    double stop_pts=dist/_Point;
+   bool follow_london=DentroHorarioFollowThroughLondon();
+   if(follow_london && FollowThrough_London_Stop_Max_Pontos>0 &&
+      stop_pts>FollowThrough_London_Stop_Max_Pontos){
+      Print("Follow-through London rejeitado: stop largo (",
+            DoubleToString(stop_pts,1)," pts | max: ",
+            DoubleToString(FollowThrough_London_Stop_Max_Pontos,1),").");
+      ResetEstado(); return;
+   }
    if(g_ob_tf=="ASIA_SWEEP" && Asian_Sweep_Stop_Max_Pontos>0 &&
       stop_pts>Asian_Sweep_Stop_Max_Pontos){
       Print("Asian sweep rejeitado: stop largo (",
@@ -1487,12 +1934,50 @@ void ExecutarEntrada()
       atr_stop_min_efetivo=ATR_Stop_Min_Max_Efetivo;
 
    if(dist<atr*atr_stop_min_efetivo){
+      double o_sc=iOpen(_Symbol,PERIOD_M1,1);
+      double c_sc=iClose(_Symbol,PERIOD_M1,1);
+      double h_sc=iHigh(_Symbol,PERIOD_M1,1);
+      double l_sc=iLow(_Symbol,PERIOD_M1,1);
+      double range_sc=h_sc-l_sc;
+      bool stop_curto_sniper=false;
+
+      if(Usar_Stop_Curto_Sniper && g_ob_tf=="H1" && range_sc>0 &&
+         stop_pts>=Stop_Curto_Min_Pontos &&
+         (!Stop_Curto_Apenas_London || SessaoAtual()=="LONDON")){
+         double corpo_sc=MathAbs(c_sc-o_sc)/range_sc;
+         double fechamento_topo_sc=(h_sc-c_sc)/range_sc;
+         double fechamento_fundo_sc=(c_sc-l_sc)/range_sc;
+         bool candle_grande=(range_sc>=atr_m1*Stop_Curto_Displacement_ATR_M1);
+         bool corpo_limpo=(corpo_sc>=Stop_Curto_Corpo_Min_Ratio);
+         bool fechamento_limpo=false;
+         if(g_direcao==1)
+            fechamento_limpo=(c_sc>o_sc && fechamento_topo_sc<=Stop_Curto_Fechamento_Extremo);
+         else
+            fechamento_limpo=(c_sc<o_sc && fechamento_fundo_sc<=Stop_Curto_Fechamento_Extremo);
+
+         stop_curto_sniper=(candle_grande && corpo_limpo && fechamento_limpo);
+      }
+
+      if(stop_curto_sniper){
+         Print("Stop curto aceito como sniper (",DoubleToString(stop_pts,1),
+               " pts | candle: ",DoubleToString(range_sc/_Point,1),
+               " pts | ATR M1: ",DoubleToString(atr_m1/_Point,1),").");
+      }
+      else{
+      g_dbg_stop_curto++;
       Print("Stop curto (",DoubleToString(dist/_Point,1),
             " pts | minimo efetivo: ",DoubleToString((atr*atr_stop_min_efetivo)/_Point,1),
             " pts). Skip.");
+      if(manter_sweep_h1){
+         Print("Tentativa H1 ignorada por stop curto; mantendo sweep para nova confirmacao.");
+         g_confirmacao_rastro_atual=false;
+         return;
+      }
       ResetEstado(); return;
+      }
    }
    if(dist>atr*ATR_Stop_Max){
+      g_dbg_stop_largo++;
       Print("Stop largo (",DoubleToString(dist/_Point,1)," pts, máx: ",
             DoubleToString(atr*ATR_Stop_Max/_Point,1),"). Skip.");
       ResetEstado(); return;
@@ -1535,8 +2020,14 @@ void ExecutarEntrada()
 
    double rsi_val=0;
    double rsi_buf[1];
-   if(CopyBuffer(g_rsi_handle,0,1,1,rsi_buf)>0)
+   bool tem_rsi=(CopyBuffer(g_rsi_handle,0,1,1,rsi_buf)>0);
+   if(tem_rsi)
       rsi_val=rsi_buf[0];
+
+   if(!FiltroMomentumNYPermite(rsi_val,tem_rsi)){
+      ResetEstado();
+      return;
+   }
 
    Print("Entrada ",(g_direcao==1 ? "BUY" : "SELL"),": ",entrada,
          " | SL: ",sl," (",DoubleToString(dist/_Point,1)," pts)",
@@ -1552,6 +2043,7 @@ void ExecutarEntrada()
    else ordem_ok=trade.Sell(lote,_Symbol,entrada,sl,tp,"SMC_Sniper");
 
    if(ordem_ok){
+      g_dbg_entradas++;
       g_trades_dia++;
       PrepararDiagnosticoEntrada((g_direcao==1 ? "BUY" : "SELL"),
                                  atr,atr_m1,rsi_val,dist/_Point,
@@ -1597,6 +2089,7 @@ void OnTick()
       if(ProcurarAsianSweep()) return;
       if(ProcurarLondonSweep()) return;
       ProcurarOB();
+      if(g_estado==SCANNING) ProcurarFVG_H1();
    }
    else if(g_estado==EM_ZONA) MonitorarSweep();
 }
