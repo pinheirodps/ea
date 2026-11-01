@@ -30,13 +30,14 @@
 #define OB_LOOKBACK_HTF      40      // barras HTF para procurar BOS/OB
 #define MIN_TRADES_VALIDO   100      // abaixo disto, OnTester devolve 0
 
-// Janelas de sessao em HORA GMT (convertidas dinamicamente via DST)
-#define ASIA_INI_GMT          0
-#define ASIA_FIM_GMT          6
-#define LONDON_INI_GMT        7
-#define LONDON_FIM_GMT       11
-#define NY_INI_GMT           12
-#define NY_FIM_GMT           16
+// Janelas de sessao
+// - Asia: ancorada em UTC fixo (centros asiaticos sem DST sazonal)
+// - Londres: ancorada em horario local de Londres (08:00 as 12:00 local)
+#define ASIA_INI_UTC          0      // 00:00 UTC (fixo)
+#define ASIA_FIM_UTC          6      // 06:00 UTC (fixo)
+#define LONDON_INI_LOCAL      8      // 08:00 local de Londres (abertura oficial)
+#define LONDON_FIM_LOCAL     12      // 12:00 local de Londres
+#define LIQ_SESSION_FIM_LOCAL 16     // 16:00 local de Londres (fecho da sessao liquida para OB)
 
 //==================================================================
 // INPUTS (7 inputs, 1 otimizavel)
@@ -218,23 +219,86 @@ int OffsetServidorGMT(const datetime t)
    return(InpOffsetInverno);        // Horario de inverno
   }
 
-int HoraServidor(const datetime agora, const int hora_gmt)
+//+------------------------------------------------------------------+
+//| Regra de DST de Londres (Reino Unido / BST)                      |
+//| Ultimo domingo de marco 01:00 UTC ate ultimo domingo outubro     |
+//+------------------------------------------------------------------+
+bool EmDST_Londres(const datetime t)
   {
-   int offset = OffsetServidorGMT(agora);
-   int h = hora_gmt + offset;
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   int ano = dt.year;
+
+   // Ultimo domingo de marco as 01:00 UTC
+   MqlDateTime d_mar;
+   d_mar.year = ano; d_mar.mon = 3; d_mar.day = 31; d_mar.hour = 1; d_mar.min = 0; d_mar.sec = 0;
+   datetime t_mar31 = StructToTime(d_mar);
+   TimeToStruct(t_mar31, d_mar);
+   int dom_mar = 31 - d_mar.day_of_week;
+   d_mar.day = dom_mar;
+   datetime dst_ini = StructToTime(d_mar);
+
+   // Ultimo domingo de outubro as 01:00 UTC
+   MqlDateTime d_out;
+   d_out.year = ano; d_out.mon = 10; d_out.day = 31; d_out.hour = 1; d_out.min = 0; d_out.sec = 0;
+   datetime t_out31 = StructToTime(d_out);
+   TimeToStruct(t_out31, d_out);
+   int dom_out = 31 - d_out.day_of_week;
+   d_out.day = dom_out;
+   datetime dst_fim = StructToTime(d_out);
+
+   return(t >= dst_ini && t < dst_fim);
+  }
+
+int OffsetLondresGMT(const datetime t)
+  {
+   return(EmDST_Londres(t) ? 1 : 0); // 0 no inverno (GMT), +1 no verao (BST)
+  }
+
+int HoraServidorDeLondres(const datetime agora, const int hora_londres)
+  {
+   int gmt = hora_londres - OffsetLondresGMT(agora);
+   int h   = gmt + OffsetServidorGMT(agora);
    while(h < 0)   h += 24;
    while(h >= 24) h -= 24;
    return(h);
   }
 
-bool DentroDaJanela(const datetime agora, const int ini_gmt, const int fim_gmt)
+int HoraServidorDeUTC(const datetime agora, const int hora_utc)
+  {
+   int h = hora_utc + OffsetServidorGMT(agora);
+   while(h < 0)   h += 24;
+   while(h >= 24) h -= 24;
+   return(h);
+  }
+
+bool DentroDaJanelaServidor(const datetime agora, const int ini_srv, const int fim_srv)
   {
    MqlDateTime d;
    TimeToStruct(agora, d);
-   int ini = HoraServidor(agora, ini_gmt);
-   int fim = HoraServidor(agora, fim_gmt);
-   if(ini <= fim) return(d.hour >= ini && d.hour < fim);
-   return(d.hour >= ini || d.hour < fim);   // janela cruza a meia-noite
+   if(ini_srv <= fim_srv) return(d.hour >= ini_srv && d.hour < fim_srv);
+   return(d.hour >= ini_srv || d.hour < fim_srv);
+  }
+
+bool DentroJanelaLondres(const datetime agora)
+  {
+   int ini = HoraServidorDeLondres(agora, LONDON_INI_LOCAL);
+   int fim = HoraServidorDeLondres(agora, LONDON_FIM_LOCAL);
+   return(DentroDaJanelaServidor(agora, ini, fim));
+  }
+
+bool DentroJanelaAsia(const datetime agora)
+  {
+   int ini = HoraServidorDeUTC(agora, ASIA_INI_UTC);
+   int fim = HoraServidorDeUTC(agora, ASIA_FIM_UTC);
+   return(DentroDaJanelaServidor(agora, ini, fim));
+  }
+
+bool DentroJanelaLiquida(const datetime agora)
+  {
+   int ini = HoraServidorDeLondres(agora, LONDON_INI_LOCAL);
+   int fim = HoraServidorDeLondres(agora, LIQ_SESSION_FIM_LOCAL);
+   return(DentroDaJanelaServidor(agora, ini, fim));
   }
 
 // Range de M1 entre dois instantes. Nunca le o indice 0 (barra aberta).
@@ -332,14 +396,14 @@ bool DetectarSweepSessao()
 
    if(InpSetup == SETUP_LONDON_SWEEP)
      {
-      if(!DentroDaJanela(agora, LONDON_INI_GMT, LONDON_FIM_GMT)) return(false);
-      datetime t_ini = dia + HoraServidor(agora, ASIA_INI_GMT) * 3600;
-      datetime t_fim = dia + HoraServidor(agora, ASIA_FIM_GMT) * 3600;
+      if(!DentroJanelaLondres(agora)) return(false);
+      datetime t_ini = dia + HoraServidorDeUTC(agora, ASIA_INI_UTC) * 3600;
+      datetime t_fim = dia + HoraServidorDeUTC(agora, ASIA_FIM_UTC) * 3600;
       if(!RangeEntre(t_ini, t_fim, ref_hi, ref_lo)) return(false);
      }
    else if(InpSetup == SETUP_ASIA_SWEEP)
      {
-      if(!DentroDaJanela(agora, ASIA_INI_GMT, ASIA_FIM_GMT)) return(false);
+      if(!DentroJanelaAsia(agora)) return(false);
       ref_hi = iHigh(_Symbol, PERIOD_D1, 1);
       ref_lo = iLow (_Symbol, PERIOD_D1, 1);
       if(ref_hi <= 0.0 || ref_lo <= 0.0 || ref_hi <= ref_lo) return(false);
@@ -386,7 +450,7 @@ bool DetectarRetornoOB()
   {
    datetime agora = iTime(_Symbol, PERIOD_M1, 1);
    // apenas sessoes liquidas
-   if(!DentroDaJanela(agora, LONDON_INI_GMT, NY_FIM_GMT)) return(false);
+   if(!DentroJanelaLiquida(agora)) return(false);
 
    double h_m1 = iHigh(_Symbol, PERIOD_M1, 1);
    double l_m1 = iLow (_Symbol, PERIOD_M1, 1);
