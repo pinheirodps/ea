@@ -1,13 +1,13 @@
 //+------------------------------------------------------------------+
 //|                                            SMC_Sniper_v4.mq5     |
-//|            Baseline minimalista - 8 inputs, 1 otimizavel         |
+//|            Baseline minimalista - 7 inputs, 1 otimizavel         |
 //|                                                                  |
 //|  OBJETIVO: medir se a estrategia SMC base tem expectativa        |
 //|  positiva, SEM filtros de excecao. Nao adicionar parametros      |
 //|  sem evidencia estatistica (ver OnTester: t-stat, n>=100).       |
 //+------------------------------------------------------------------+
-#property copyright "SMC Sniper v4.0"
-#property version   "4.00"
+#property copyright "SMC Sniper v4.1"
+#property version   "4.10"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -30,7 +30,7 @@
 #define OB_LOOKBACK_HTF      40      // barras HTF para procurar BOS/OB
 #define MIN_TRADES_VALIDO   100      // abaixo disto, OnTester devolve 0
 
-// Janelas de sessao em HORA GMT (convertidas via InpGMTOffsetHoras)
+// Janelas de sessao em HORA GMT (convertidas dinamicamente via DST)
 #define ASIA_INI_GMT          0
 #define ASIA_FIM_GMT          6
 #define LONDON_INI_GMT        7
@@ -39,7 +39,7 @@
 #define NY_FIM_GMT           16
 
 //==================================================================
-// INPUTS
+// INPUTS (7 inputs, 1 otimizavel)
 //==================================================================
 enum ENUM_SETUP
   {
@@ -57,7 +57,6 @@ input double          InpRR              = 2.0;                // Risk/Reward (U
 input double          InpRiscoPct        = 0.50;   // Risco por trade (% equity)
 input int             InpMaxSpreadPts    = 20;     // Spread maximo (pontos)
 input double          InpComissaoPorLote = 7.0;    // Comissao round-turn por lote (moeda da conta)
-input int             InpGMTOffsetHoras  = 2;      // Offset do servidor vs GMT
 input long            InpMagic           = 440001; // Magic number
 
 //==================================================================
@@ -108,7 +107,7 @@ int OnInit()
       return(INIT_FAILED);
      }
 
-   PrintFormat("SMC Sniper v4.0 | setup=%s | HTF=%s | RR=%.2f | risco=%.2f%%",
+   PrintFormat("SMC Sniper v4.1 | setup=%s | HTF=%s | RR=%.2f | risco=%.2f%%",
                EnumToString(InpSetup), EnumToString(InpHTF), InpRR, InpRiscoPct);
    return(INIT_SUCCEEDED);
   }
@@ -143,9 +142,46 @@ datetime InicioDoDia(const datetime t)
    return(StructToTime(d));
   }
 
-int HoraServidor(const int hora_gmt)
+//+------------------------------------------------------------------+
+//| Offset do servidor vs GMT com suporte a DST dos brokers Forex    |
+//| Quase a totalidade dos servidores Forex (ActivTrades, IC, etc.)  |
+//| sincroniza com o fecho de Nova Iorque (US DST):                 |
+//| - Inverno (novembro a marco): GMT+2                              |
+//| - Verao (2o domingo marco a 1o domingo novembro): GMT+3         |
+//+------------------------------------------------------------------+
+int OffsetServidorGMT(const datetime t)
   {
-   int h = hora_gmt + InpGMTOffsetHoras;
+   MqlDateTime dt;
+   TimeToStruct(t, dt);
+   int ano = dt.year;
+
+   // 2o domingo de marco as 02:00
+   MqlDateTime d_mar;
+   d_mar.year = ano; d_mar.mon = 3; d_mar.day = 1; d_mar.hour = 2; d_mar.min = 0; d_mar.sec = 0;
+   datetime t_mar1 = StructToTime(d_mar);
+   TimeToStruct(t_mar1, d_mar);
+   int dom_mar = (d_mar.day_of_week == 0) ? 8 : (15 - d_mar.day_of_week);
+   d_mar.day = dom_mar;
+   datetime dst_ini = StructToTime(d_mar);
+
+   // 1o domingo de novembro as 02:00
+   MqlDateTime d_nov;
+   d_nov.year = ano; d_nov.mon = 11; d_nov.day = 1; d_nov.hour = 2; d_nov.min = 0; d_nov.sec = 0;
+   datetime t_nov1 = StructToTime(d_nov);
+   TimeToStruct(t_nov1, d_nov);
+   int dom_nov = (d_nov.day_of_week == 0) ? 1 : (8 - d_nov.day_of_week);
+   d_nov.day = dom_nov;
+   datetime dst_fim = StructToTime(d_nov);
+
+   if(t >= dst_ini && t < dst_fim)
+      return(3); // GMT+3 no verao
+   return(2);    // GMT+2 no inverno
+  }
+
+int HoraServidor(const datetime agora, const int hora_gmt)
+  {
+   int offset = OffsetServidorGMT(agora);
+   int h = hora_gmt + offset;
    while(h < 0)   h += 24;
    while(h >= 24) h -= 24;
    return(h);
@@ -155,8 +191,8 @@ bool DentroDaJanela(const datetime agora, const int ini_gmt, const int fim_gmt)
   {
    MqlDateTime d;
    TimeToStruct(agora, d);
-   int ini = HoraServidor(ini_gmt);
-   int fim = HoraServidor(fim_gmt);
+   int ini = HoraServidor(agora, ini_gmt);
+   int fim = HoraServidor(agora, fim_gmt);
    if(ini <= fim) return(d.hour >= ini && d.hour < fim);
    return(d.hour >= ini || d.hour < fim);   // janela cruza a meia-noite
   }
@@ -257,8 +293,8 @@ bool DetectarSweepSessao()
    if(InpSetup == SETUP_LONDON_SWEEP)
      {
       if(!DentroDaJanela(agora, LONDON_INI_GMT, LONDON_FIM_GMT)) return(false);
-      datetime t_ini = dia + HoraServidor(ASIA_INI_GMT) * 3600;
-      datetime t_fim = dia + HoraServidor(ASIA_FIM_GMT) * 3600;
+      datetime t_ini = dia + HoraServidor(agora, ASIA_INI_GMT) * 3600;
+      datetime t_fim = dia + HoraServidor(agora, ASIA_FIM_GMT) * 3600;
       if(!RangeEntre(t_ini, t_fim, ref_hi, ref_lo)) return(false);
      }
    else if(InpSetup == SETUP_ASIA_SWEEP)
@@ -455,17 +491,21 @@ void ExecutarEntrada()
       return;
      }
 
-   //--- CORRECAO 2: comissao dentro do sizing.
-   // Sem ela o risco real excede o nominal (a 7/lote round-turn,
-   // ~7% acima em stops tipicos de EURUSD).
-   double tick_valor = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_VALUE);
-   double tick_tam   = SymbolInfoDouble(_Symbol, SYMBOL_TRADE_TICK_SIZE);
-   if(tick_valor <= 0.0 || tick_tam <= 0.0) { ResetEstado(); return; }
+   //--- CORRECAO 2: calculo exato de perda por lote na moeda da conta via OrderCalcProfit.
+   // Elimina o vies cambial em pares cruzados (USDJPY, GBPUSD com conta EUR/USD)
+   // e inclui a comissao round-turn dentro do risco projetado.
+   ENUM_ORDER_TYPE order_type = (g_direcao == 1) ? ORDER_TYPE_BUY : ORDER_TYPE_SELL;
+   double perda_calc = 0.0;
+   if(!OrderCalcProfit(order_type, _Symbol, 1.0, entrada, sl, perda_calc))
+     {
+      ResetEstado();
+      return;
+     }
 
-   double risco_moeda   = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiscoPct / 100.0;
-   double perda_por_lote = (dist / tick_tam) * tick_valor + InpComissaoPorLote;
+   double perda_por_lote = MathAbs(perda_calc) + InpComissaoPorLote;
    if(perda_por_lote <= 0.0) { ResetEstado(); return; }
 
+   double risco_moeda = AccountInfoDouble(ACCOUNT_EQUITY) * InpRiscoPct / 100.0;
    double lote = risco_moeda / perda_por_lote;
 
    double lote_min  = SymbolInfoDouble(_Symbol, SYMBOL_VOLUME_MIN);
@@ -479,10 +519,11 @@ void ExecutarEntrada()
      }
    lote = MathMax(lote_min, MathMin(lote_max, lote));
 
-   // Se o lote minimo ja excede o risco alvo, nao force o trade.
-   if(lote * perda_por_lote > risco_moeda * 1.5)
+   // Guard de risco estrito a 1.0x: se o lote minimo exceder o risco alvo, aborta.
+   if(lote * perda_por_lote > risco_moeda)
      {
-      PrintFormat("Entrada abortada: lote minimo (%.2f) excede o risco alvo.", lote);
+      PrintFormat("Entrada abortada: lote minimo (%.2f) excede o risco alvo de %.2f (perda projetada: %.2f)",
+                  lote, risco_moeda, lote * perda_por_lote);
       ResetEstado();
       return;
      }
