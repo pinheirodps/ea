@@ -21,6 +21,18 @@ A auditoria linha a linha dos logs brutos dos agentes do Strategy Tester separou
 2. No `H1_OB`, a expectativa das reentradas pós-loss no mesmo dia ($-0,0935R$, $n=1.635$) foi superior à do 1.º trade do dia ($-0,1567R$, $n=950$); **a trava de 1 trade/dia está descartada**.
 3. O símbolo `EURUSD` standard da ActivTrades é *spread-only* (`DEAL_COMMISSION = 0`). Em todas as execuções nesta conta, `InpComissaoPorLote` deve ser `0.0` para evitar dupla cobrança no `OnTester()` e subdimensionamento no `OrderCalcProfit()`.
 
+### 1.1 Validação por Controle Empírico nos Ticks Reais (`tools/controle_aleatorio_ticks.py`)
+
+Para verificar se a fórmula analítica $p_0 = \frac{1 - S/D}{3}$ sofre viés por deriva intradiária, saltos discretos ou alargamento momentâneo de spread, simularam-se $1.500$ entradas aleatórias por setup ($4.500$ trades no total, `seed=42`) diretamente nos ticks reais de `EURUSD 2022–2025` (com teto físico no byte `5.126.074.790` antes de `2026.01.01`, filtro `spread <= 20 pts`, compra no `Ask` / saída no `Bid`, venda no `Bid` / saída no `Ask`, `RR = 2.0` e stops sorteados da distribuição empírica de cada setup):
+
+| Setup (Janela) | $n$ | Spread médio | WR Empírico (Ticks) | WR Analítico ($p_0$) | Dif. Empírico − $p_0$ | $\mathbb{E}[R]$ Empírico (IC 95%) |
+|---|---|---|---|---|---|---|
+| `SETUP_LONDON_SWEEP` | 1.500 | 9,64 pts | **26,67%** | 27,00% | $-0,34\text{ p.p.}$ | **$-0,2145R$** ($\pm 0,0683R$) |
+| `SETUP_H1_OB` | 1.500 | 9,74 pts | **28,47%** | 29,17% | $-0,70\text{ p.p.}$ | **$-0,1564R$** ($\pm 0,0694R$) |
+| `SETUP_ASIA_SWEEP` | 1.500 | 9,55 pts | **26,27%** | 26,53% | $-0,26\text{ p.p.}$ | **$-0,2233R$** ($\pm 0,0677R$) |
+
+O controle empírico confirma a benchmark analítica $p_0$ dentro de $< 1$ erro-padrão (a ligeira diferença de $-0,3$ a $-0,7\text{ p.p.}$ reflete micro-slippage em saltos de ticks e variações intratick de spread). Confirma-se que os resultados da `v4.10` em `M1` são indistinguíveis de entradas aleatórias pagando spread.
+
 ---
 
 ## 2. Partição Estrita de Dados (Proteção contra Sobreajuste)

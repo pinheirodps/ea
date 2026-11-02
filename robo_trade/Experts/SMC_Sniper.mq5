@@ -6,8 +6,8 @@
 //|  positiva, SEM filtros de excecao. Nao adicionar parametros      |
 //|  sem evidencia estatistica (ver OnTester: t-stat, n>=100).       |
 //+------------------------------------------------------------------+
-#property copyright "SMC Sniper v4.1"
-#property version   "4.10"
+#property copyright "SMC Sniper v4.2"
+#property version   "4.20"
 #property strict
 
 #include <Trade\Trade.mqh>
@@ -20,12 +20,12 @@
 // afina-las contra o backtest sem recompilar. Durante a fase de
 // validacao, NAO TOCAR.
 //==================================================================
-#define FRACTAL_LARGURA       2      // barras de cada lado do swing M1
-#define SWING_LOOKBACK_M1    40      // ate onde procurar o swing de referencia
-#define SL_PADDING_ATR_M1     0.15   // folga do SL alem do extremo do sweep
+#define FRACTAL_LARGURA       2      // barras de cada lado do swing LTF
+#define SWING_LOOKBACK_LTF   40      // ate onde procurar o swing de referencia (barras LTF)
+#define SL_PADDING_ATR_LTF    0.15   // folga do SL alem do extremo do sweep (x ATR LTF)
 #define STOP_MIN_ATR_HTF      0.30   // stop minimo aceite (x ATR do HTF)
 #define STOP_MAX_ATR_HTF      1.50   // stop maximo aceite (x ATR do HTF)
-#define TIMEOUT_BARRAS_M1    30      // barras M1 a aguardar confirmacao CHoCH
+#define TIMEOUT_BARRAS_LTF   30      // barras LTF a aguardar confirmacao CHoCH
 #define ATR_PERIODO          14
 #define OB_LOOKBACK_HTF      40      // barras HTF para procurar BOS/OB
 #define MIN_TRADES_VALIDO   100      // abaixo disto, OnTester devolve 0
@@ -59,6 +59,7 @@ enum ENUM_DST
 // --- Estrategia ---
 input ENUM_SETUP      InpSetup           = SETUP_LONDON_SWEEP; // Setup (seletor, nao afinar)
 input ENUM_TIMEFRAMES InpHTF             = PERIOD_H1;          // Timeframe de estrutura
+input ENUM_TIMEFRAMES InpLTF             = PERIOD_M5;          // Timeframe de gatilho (H1 prereg: M5)
 input double          InpRR              = 2.0;                // Risk/Reward (UNICO otimizavel)
 
 // --- Operacionais ---
@@ -66,7 +67,7 @@ input int             InpOffsetInverno   = 1;      // Offset-base do servidor vs
 input ENUM_DST        InpDST             = DST_EU; // Regra sazonal do servidor (EU/US/Nenhum)
 input double          InpRiscoPct        = 0.50;   // Risco por trade (% equity)
 input int             InpMaxSpreadPts    = 20;     // Spread maximo (pontos)
-input double          InpComissaoPorLote = 7.0;    // Comissao round-turn por lote (moeda da conta)
+input double          InpComissaoPorLote = 0.0;    // Comissao round-turn/lote (0 em conta spread-only)
 input long            InpMagic           = 440001; // Magic number
 
 //==================================================================
@@ -81,7 +82,7 @@ enum ENUM_ESTADO
 
 CTrade        trade;
 ENUM_ESTADO   g_estado           = EST_SCAN;
-datetime      g_ultima_barra_m1  = 0;
+datetime      g_ultima_barra_ltf = 0;
 int           g_direcao          = 0;      // +1 compra, -1 venda
 double        g_sweep_extremo    = 0.0;    // preco do extremo varrido
 double        g_nivel_choch      = 0.0;    // nivel cujo rompimento confirma
@@ -89,7 +90,7 @@ int           g_barras_armado    = 0;
 datetime      g_armado_em        = 0;
 
 int           g_atr_htf_handle   = INVALID_HANDLE;
-int           g_atr_m1_handle    = INVALID_HANDLE;
+int           g_atr_ltf_handle   = INVALID_HANDLE;
 
 // contadores de diagnostico (apenas Print no final)
 int           g_cnt_sweep        = 0;
@@ -108,25 +109,31 @@ int OnInit()
    trade.SetTypeFillingBySymbol(_Symbol);
    trade.SetDeviationInPoints(10);
 
-   g_atr_htf_handle = iATR(_Symbol, InpHTF, ATR_PERIODO);
-   g_atr_m1_handle  = iATR(_Symbol, PERIOD_M1, ATR_PERIODO);
+   if(PeriodSeconds(InpLTF) >= PeriodSeconds(InpHTF))
+     {
+      Print("ERRO: InpLTF deve ser estritamente inferior a InpHTF.");
+      return(INIT_PARAMETERS_INCORRECT);
+     }
 
-   if(g_atr_htf_handle == INVALID_HANDLE || g_atr_m1_handle == INVALID_HANDLE)
+   g_atr_htf_handle = iATR(_Symbol, InpHTF, ATR_PERIODO);
+   g_atr_ltf_handle = iATR(_Symbol, InpLTF, ATR_PERIODO);
+
+   if(g_atr_htf_handle == INVALID_HANDLE || g_atr_ltf_handle == INVALID_HANDLE)
      {
       Print("ERRO: falha ao criar handles ATR.");
       return(INIT_FAILED);
      }
 
-   PrintFormat("SMC Sniper v4.1 | setup=%s | HTF=%s | RR=%.2f | risco=%.2f%% | offset_base=GMT+%d | DST=%s",
-               EnumToString(InpSetup), EnumToString(InpHTF), InpRR, InpRiscoPct,
-               InpOffsetInverno, EnumToString(InpDST));
+   PrintFormat("SMC Sniper v4.2 | setup=%s | HTF=%s | LTF=%s | RR=%.2f | risco=%.2f%% | comm=%.2f | offset_base=GMT+%d | DST=%s",
+               EnumToString(InpSetup), EnumToString(InpHTF), EnumToString(InpLTF),
+               InpRR, InpRiscoPct, InpComissaoPorLote, InpOffsetInverno, EnumToString(InpDST));
    return(INIT_SUCCEEDED);
   }
 
 void OnDeinit(const int reason)
   {
    if(g_atr_htf_handle != INVALID_HANDLE) IndicatorRelease(g_atr_htf_handle);
-   if(g_atr_m1_handle  != INVALID_HANDLE) IndicatorRelease(g_atr_m1_handle);
+   if(g_atr_ltf_handle != INVALID_HANDLE) IndicatorRelease(g_atr_ltf_handle);
 
    PrintFormat("DIAG | sweeps=%d entradas=%d | rejeicoes: timeout=%d stop_fora=%d spread=%d stops_level=%d",
                g_cnt_sweep, g_cnt_entradas, g_cnt_timeout,
@@ -324,34 +331,34 @@ bool RangeEntre(const datetime t_ini, const datetime t_fim, double &hi, double &
    return(hi > lo);
   }
 
-// Swing low fractal mais recente em M1 (ignora a barra 0).
+// Swing low fractal mais recente em InpLTF (ignora a barra 0).
 bool SwingLowRecente(double &nivel)
   {
-   for(int i = 1 + FRACTAL_LARGURA; i <= SWING_LOOKBACK_M1; i++)
+   for(int i = 1 + FRACTAL_LARGURA; i <= SWING_LOOKBACK_LTF; i++)
      {
-      double c = iLow(_Symbol, PERIOD_M1, i);
+      double c = iLow(_Symbol, InpLTF, i);
       bool ok = true;
       for(int k = 1; k <= FRACTAL_LARGURA && ok; k++)
         {
-         if(iLow(_Symbol, PERIOD_M1, i - k) <= c) ok = false;
-         if(iLow(_Symbol, PERIOD_M1, i + k) <= c) ok = false;
+         if(iLow(_Symbol, InpLTF, i - k) <= c) ok = false;
+         if(iLow(_Symbol, InpLTF, i + k) <= c) ok = false;
         }
       if(ok) { nivel = c; return(true); }
      }
    return(false);
   }
 
-// Swing high fractal mais recente em M1 (ignora a barra 0).
+// Swing high fractal mais recente em InpLTF (ignora a barra 0).
 bool SwingHighRecente(double &nivel)
   {
-   for(int i = 1 + FRACTAL_LARGURA; i <= SWING_LOOKBACK_M1; i++)
+   for(int i = 1 + FRACTAL_LARGURA; i <= SWING_LOOKBACK_LTF; i++)
      {
-      double c = iHigh(_Symbol, PERIOD_M1, i);
+      double c = iHigh(_Symbol, InpLTF, i);
       bool ok = true;
       for(int k = 1; k <= FRACTAL_LARGURA && ok; k++)
         {
-         if(iHigh(_Symbol, PERIOD_M1, i - k) >= c) ok = false;
-         if(iHigh(_Symbol, PERIOD_M1, i + k) >= c) ok = false;
+         if(iHigh(_Symbol, InpLTF, i - k) >= c) ok = false;
+         if(iHigh(_Symbol, InpLTF, i + k) >= c) ok = false;
         }
       if(ok) { nivel = c; return(true); }
      }
@@ -390,7 +397,7 @@ void ResetEstado()
 //==================================================================
 bool DetectarSweepSessao()
   {
-   datetime agora  = iTime(_Symbol, PERIOD_M1, 1);
+   datetime agora  = iTime(_Symbol, InpLTF, 1);
    datetime dia    = InicioDoDia(agora);
    double   ref_hi = 0.0, ref_lo = 0.0;
 
@@ -411,9 +418,9 @@ bool DetectarSweepSessao()
    else
       return(false);
 
-   double h = iHigh (_Symbol, PERIOD_M1, 1);
-   double l = iLow  (_Symbol, PERIOD_M1, 1);
-   double c = iClose(_Symbol, PERIOD_M1, 1);
+   double h = iHigh (_Symbol, InpLTF, 1);
+   double l = iLow  (_Symbol, InpLTF, 1);
+   double c = iClose(_Symbol, InpLTF, 1);
 
    // Sweep do topo -> procura venda
    if(h > ref_hi && c < ref_hi)
@@ -448,12 +455,12 @@ bool DetectarSweepSessao()
 //==================================================================
 bool DetectarRetornoOB()
   {
-   datetime agora = iTime(_Symbol, PERIOD_M1, 1);
+   datetime agora = iTime(_Symbol, InpLTF, 1);
    // apenas sessoes liquidas
    if(!DentroJanelaLiquida(agora)) return(false);
 
-   double h_m1 = iHigh(_Symbol, PERIOD_M1, 1);
-   double l_m1 = iLow (_Symbol, PERIOD_M1, 1);
+   double h_ltf = iHigh(_Symbol, InpLTF, 1);
+   double l_ltf = iLow (_Symbol, InpLTF, 1);
 
    for(int i = 2; i <= OB_LOOKBACK_HTF; i++)
      {
@@ -473,7 +480,7 @@ bool DetectarRetornoOB()
          if(bos)
            {
             // Retorno da vela M1 a zona do OB
-            if(l_m1 <= ob_hi && h_m1 >= ob_lo)
+            if(l_ltf <= ob_hi && h_ltf >= ob_lo)
               {
                double nivel;
                if(SwingHighRecente(nivel))
@@ -503,7 +510,7 @@ bool DetectarRetornoOB()
          if(bos)
            {
             // Retorno da vela M1 a zona do OB
-            if(h_m1 >= ob_lo && l_m1 <= ob_hi)
+            if(h_ltf >= ob_lo && l_ltf <= ob_hi)
               {
                double nivel;
                if(SwingLowRecente(nivel))
@@ -523,12 +530,12 @@ bool DetectarRetornoOB()
 //==================================================================
 // CONFIRMACAO CHoCH
 //
-// Apos o sweep, so entra se a barra M1 FECHADA romper o swing de
+// Apos o sweep, so entra se a barra InpLTF FECHADA romper o swing de
 // referencia na direcao do trade.
 //==================================================================
 bool ConfirmouCHoCH()
   {
-   double c = iClose(_Symbol, PERIOD_M1, 1);
+   double c = iClose(_Symbol, InpLTF, 1);
    if(g_direcao ==  1) return(c > g_nivel_choch);
    if(g_direcao == -1) return(c < g_nivel_choch);
    return(false);
@@ -550,11 +557,11 @@ void ExecutarEntrada()
 
    double ask = SymbolInfoDouble(_Symbol, SYMBOL_ASK);
    double bid = SymbolInfoDouble(_Symbol, SYMBOL_BID);
-   double atr_m1  = ATR(g_atr_m1_handle);
+   double atr_ltf = ATR(g_atr_ltf_handle);
    double atr_htf = ATR(g_atr_htf_handle);
-   if(atr_htf <= 0.0 || atr_m1 <= 0.0) { ResetEstado(); return; }
+   if(atr_htf <= 0.0 || atr_ltf <= 0.0) { ResetEstado(); return; }
 
-   double padding = atr_m1 * SL_PADDING_ATR_M1;
+   double padding = atr_ltf * SL_PADDING_ATR_LTF;
 
    // Entrada no lado correto do spread; SL e TP medidos a partir dela,
    // por isso o spread fica DENTRO do R e nao por fora.
@@ -645,9 +652,9 @@ void ExecutarEntrada()
      {
       g_cnt_entradas++;
       g_estado = EST_EM_TRADE;
-      PrintFormat("ENTRADA %s | %.5f | SL %.5f (%.1f pts) | TP %.5f | lote %.2f | spread %d",
+      PrintFormat("ENTRADA %s | %.5f | SL %.5f (%.1f pts) | TP %.5f | lote %.2f | spread %d | risco %.2f",
                   (g_direcao == 1 ? "BUY" : "SELL"), entrada, sl,
-                  dist / _Point, tp, lote, (int)spread);
+                  dist / _Point, tp, lote, (int)spread, risco_moeda);
      }
    else
      {
@@ -672,10 +679,10 @@ void OnTick()
      }
 
    //--- CORRECAO 3 (implicita): toda a logica corre uma vez por
-   // barra M1 FECHADA. Nenhuma leitura usa o indice 0.
-   datetime barra = iTime(_Symbol, PERIOD_M1, 0);
-   if(barra == g_ultima_barra_m1) return;
-   g_ultima_barra_m1 = barra;
+   // barra InpLTF FECHADA. Nenhuma leitura usa o indice 0.
+   datetime barra = iTime(_Symbol, InpLTF, 0);
+   if(barra == g_ultima_barra_ltf) return;
+   g_ultima_barra_ltf = barra;
 
    if(TemPosicaoAberta()) { g_estado = EST_EM_TRADE; return; }
 
@@ -703,7 +710,7 @@ void OnTick()
          return;
         }
 
-      if(g_barras_armado >= TIMEOUT_BARRAS_M1)
+      if(g_barras_armado >= TIMEOUT_BARRAS_LTF)
         {
          g_cnt_timeout++;
          ResetEstado();

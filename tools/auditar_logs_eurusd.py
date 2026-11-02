@@ -18,13 +18,12 @@ import re
 import math
 from collections import defaultdict
 
-BASE_TESTER = r"C:\Users\Asus\AppData\Roaming\MetaQuotes\Tester\4508F68B4778C83AAAFD7D6DABBAD068"
-LOGS = [
-    os.path.join(BASE_TESTER, "Agent-127.0.0.1-3000", "logs", "20261102.log"),
-    os.path.join(BASE_TESTER, "Agent-127.0.0.1-3001", "logs", "20261102.log"),
-]
+import glob
 
-RE_INIT = re.compile(r"SMC Sniper v4\.1 \| setup=(\S+)")
+BASE_TESTER = r"C:\Users\Asus\AppData\Roaming\MetaQuotes\Tester\4508F68B4778C83AAAFD7D6DABBAD068"
+LOGS = sorted(glob.glob(os.path.join(BASE_TESTER, "Agent-*", "logs", "*.log")))
+
+RE_INIT = re.compile(r"SMC Sniper (v4\.\d+) \| setup=(\S+)(?: \| HTF=\S+ \| LTF=(\S+))?")
 RE_ENTRADA = re.compile(
     r"(\d{4}\.\d{2}\.\d{2}) (\d{2}:\d{2}:\d{2})\s+ENTRADA (BUY|SELL) \| "
     r"([\d.]+) \| SL ([\d.]+) \(([\d.]+) pts\) \| TP ([\d.]+) \| lote ([\d.]+) \| spread (\d+)"
@@ -50,7 +49,10 @@ def parse_runs():
         for line in lines:
             m_init = RE_INIT.search(line)
             if m_init:
-                current_setup = m_init.group(1)
+                ver = m_init.group(1)
+                sname = m_init.group(2)
+                ltf = m_init.group(3) or "PERIOD_M1"
+                current_setup = f"{ver}:{sname}:{ltf}"
                 trades = []
                 open_trade = None
                 continue
@@ -145,12 +147,10 @@ def mean_sd_t(vals):
     return m, sd, t
 
 
-def report():
+def report(filtro=None):
     runs = parse_runs()
-    order = ["SETUP_LONDON_SWEEP", "SETUP_H1_OB", "SETUP_ASIA_SWEEP"]
-    for setup in order:
-        if setup not in runs:
-            print(f"[AVISO] {setup} nao encontrado.")
+    for setup in sorted(runs.keys()):
+        if filtro and filtro not in setup:
             continue
         info = runs[setup]
         tr = info["trades"]
